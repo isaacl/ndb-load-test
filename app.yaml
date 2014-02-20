@@ -1,8 +1,8 @@
 application: google.com:ls
-version: 2
+version: 4
 runtime: python27
 api_version: 1
-threadsafe: true
+threadsafe: false
 
 handlers:
 - url: /admin/.*
@@ -16,5 +16,9 @@ libraries:
   version: latest
 - name: jinja2
   version: latest
-- name: ssl
-  version: latest
+
+builtins:
+- appstats: on
+
+inbound_services:
+- warmup
