@@ -6,6 +6,7 @@ import logging
 import pprint
 import time
 import weakref
+import threading
 import os
 
 import webapp2
@@ -13,6 +14,27 @@ import webapp2
 from google.appengine.api import runtime
 from google.appengine.api import taskqueue
 from google.appengine.ext import ndb
+
+from guppy import hpy
+hp = hpy()
+heaps = []#[hp.heap()]
+
+smem = runtime.memory_usage().current()
+if smem == 0:
+  def mem():
+    t = 0
+    for l in open('/proc/%d/smaps' % os.getpid()):
+      if l.startswith('Private'):
+        t += int(l.split()[1])
+    return t
+  smem = mem()
+else:
+  mem = lambda: runtime.memory_usage().current()
+
+def get_mem():
+  gc.collect()
+  time.sleep(1)
+  return mem()
 
 
 class Entity(ndb.Model):
@@ -23,9 +45,10 @@ class Stat(ndb.Expando):
 
 class BaseHandler(webapp2.RequestHandler):
   def logger(self):
-    self.start_mem = runtime.memory_usage().current()
+    self.start_mem = get_mem()
     self.start_t = time.time()
     logger = logging.getLogger(self.__class__.__name__)
+    return logger
     sh = logging.StreamHandler(self.response)
     formatter = logging.Formatter('%(asctime)s - %(message)s')
     formatter.formatTime = lambda _, *__: '%.2f %.2f' % (
@@ -68,6 +91,8 @@ def get_stat(request, run=None):
   stat.cutoff = int(request.get('cutoff', int(stat.opt_ent_class) * 0.95))
   return stat
 
+all_qs = []
+all_threads = {}
 def query(logger, stat, start_t, start_mem):
   stat.instance = md5(os.environ.get('INSTANCE_ID'))[:10]
   os.environ['QUERY_NUM'] = q_num = os.environ.get('QUERY_NUM', 0) + 1
@@ -104,9 +129,14 @@ def query(logger, stat, start_t, start_mem):
     #  #from meliae import scanner
     #  #scanner.dump_all_objects('/tmp/maliae/%d_%s_%d_%s_mem.dat' % (stat.batch_size, stat.paged, i, stat.gc))
 
+ 
   entity = None
-  if stat.opt_use_gc:
-    gc.collect()
+  #if stat.opt_use_gc:
+  #  gc.collect()
+  new_mem = get_mem()
+
+  tid = all_threads.setdefault(thread.get_ident(), len(all_threads))
+  all_qs.append((tid, new_mem - smem))
   stat.ents_in_mem = len(wd)
   # logging.info(pprint.pformat(filter(bool,
   #   sorted([getattr(e._result, 'key', None) for e in getattr(fu, '_queue', [])] for fu in ndb.tasklets._state.all_pending))))
@@ -115,11 +145,26 @@ def query(logger, stat, start_t, start_mem):
   stat.pending_rpcs = len(ndb.eventloop._state.event_loop.rpcs)
   stat.pending_futures = len(ndb.tasklets._state.all_pending)
   stat.runtime = time.time() - start_t
-  time.sleep(2)
   stat.start_mem = start_mem
-  stat.net_mem = runtime.memory_usage().current() - start_mem
+  stat.net_mem = new_mem - start_mem
+  stat.qs = ','.join(str(e) for e in all_qs)
   logger.info(stat)
   stat.put()
+  heaps.append(hp.heap())
+  if len(heaps) > 2:
+    import pdb; pdb.set_trace()
+class MyThread(threading.Thread):
+  def run(self):
+    while True:
+      logging.info('Sleeping...')
+      time.sleep(10)
+
+
+class ThreadTest(BaseHandler):
+  def get(self):
+    MyThread().start()
+    logging.info('Done.')
+
 
 class TaskHandler(BaseHandler):
   def get(self):
@@ -182,6 +227,7 @@ class Stats(webapp2.RequestHandler):
 
 app = webapp2.WSGIApplication([
     ('/create', CreateData),
+    ('/threadt', ThreadTest),
     ('/task/query', TaskHandler),
     ('/stats', Stats)
     ], debug=True)
