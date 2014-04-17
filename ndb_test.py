@@ -1,8 +1,9 @@
 import sys, os
-import threading, thread
-sys.modules.pop('google', None)
 sys.path.insert(0, os.environ.get('GOOGLE_APPENGINE_SDK_PATH'))
 sys.path.insert(0, os.environ.get('GOOGLE_APPENGINE_NDB_PATH'))
+from google.appengine.dist27 import threading
+import thread
+sys.modules.pop('google', None)
 import dev_appserver
 dev_appserver.fix_sys_path()
 from google.appengine.ext import testbed
@@ -22,6 +23,8 @@ t.activate()
 t.init_datastore_v3_stub(use_sqlite=True, datastore_file='100GzipText.sqlite')
 t.init_memcache_stub()
 import ndb
+class NEntity(ndb.Model):
+  pass
 class Entity(ndb.Model):
   val = ndb.TextProperty(compressed=True)
 hp = hpy()
@@ -29,7 +32,7 @@ import gc, inspect, weakref, pprint
 from pprint import pprint as pp
 wd = weakref.WeakValueDictionary()
 ndb.get_context().set_cache_policy(False)
-ndb.get_context().set_memcache_policy(False)
+#ndb.get_context().set_memcache_policy(False)
 hp.setref()
 
 def mem():
@@ -39,6 +42,8 @@ def mem():
       t += int(l.split()[1])
   return t
 
+tids = {}
+futs = weakref.WeakKeyDictionary()
 
 def run_once():
   wd = weakref.WeakValueDictionary()
@@ -48,6 +53,9 @@ def run_once():
       wd[i] = ent
       if i == 95:
         break
+    NEntity().put()
+    tid = tids.setdefault(thread.get_ident(), len(tids))
+    futs.update((fut, tid) for fut in ndb.tasklets._state.all_pending)
   t = threading.Thread(target=f)
   t.start(); t.join()
   gc.collect()

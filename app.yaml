@@ -1,5 +1,5 @@
 application: google.com:ls
-version: 7
+version: 8
 runtime: python27
 api_version: 1
 threadsafe: false
@@ -19,6 +19,5 @@ libraries:
 
 builtins:
 - appstats: on
-
 inbound_services:
 - warmup

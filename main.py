@@ -13,11 +13,23 @@ import webapp2
 
 from google.appengine.api import runtime
 from google.appengine.api import taskqueue
-from google.appengine.ext import ndb
 
-from guppy import hpy
-hp = hpy()
-heaps = []#[hp.heap()]
+try:
+  import manhole
+  manhole.install()
+  from guppy import hpy
+  hp = hpy()
+  heaps = []#[hp.heap()]
+except Exception:
+  print 'caught exception, continuing'
+
+try:
+  import ndb
+except:
+  from google.appengine.ext import ndb
+
+START_T = time.time()
+
 
 smem = runtime.memory_usage().current()
 if smem == 0:
@@ -42,12 +54,16 @@ class Entity(ndb.Model):
 
 class Stat(ndb.Expando):
   end_time = ndb.DateTimeProperty(auto_now_add=True)
+  qs = ndb.TextProperty()
+  all_els = ndb.TextProperty()
+  all_pending = ndb.TextProperty()
 
 class BaseHandler(webapp2.RequestHandler):
   def logger(self):
     self.start_mem = get_mem()
     self.start_t = time.time()
     logger = logging.getLogger(self.__class__.__name__)
+    self.response.headers['Content-Type'] = 'text/plain'
     return logger
     sh = logging.StreamHandler(self.response)
     formatter = logging.Formatter('%(asctime)s - %(message)s')
@@ -56,7 +72,6 @@ class BaseHandler(webapp2.RequestHandler):
     logger.root.handlers[0].setFormatter(formatter)
     sh.setFormatter(formatter)
     logger.addHandler(sh)
-    self.response.headers['Content-Type'] = 'text/plain'
     return logger
 
 def md5(*data):
@@ -91,13 +106,27 @@ def get_stat(request, run=None):
   stat.cutoff = int(request.get('cutoff', int(stat.opt_ent_class) * 0.95))
   return stat
 
+class Foo(object): pass
 all_qs = []
 all_threads = {}
+all_els = weakref.WeakKeyDictionary()
+all_pending = weakref.WeakValueDictionary()
+os.a = [all_threads,all_els,all_pending]
+all_foos = weakref.WeakKeyDictionary()
 def query(logger, stat, start_t, start_mem):
+  gc.collect()
+  time.sleep(.5)
+  stat.all_els = pprint.pformat(dict(all_els))
+  stat.all_pending = pprint.pformat(sorted((k, repr(v)) for k, v in all_pending.iteritems()))
+  stat.start_futs = pprint.pformat(list(ndb.tasklets._state.all_pending))
+  stat.prev_foos = len(all_foos)
+  ndb.tasklets._state.f = f = Foo()
+  all_foos[f] = '%.3f' % (time.time() - START_T)
   stat.instance = md5(os.environ.get('INSTANCE_ID'))[:10]
   os.environ['QUERY_NUM'] = q_num = os.environ.get('QUERY_NUM', 0) + 1
   stat.thread = '%d:%d' % (thread.get_ident(), q_num)
   gc.collect()
+  #ndb.get_context().set_memcache_policy(False)
   ndb.get_context().set_cache_policy(False)
   #logger.info(stat)
   ancestor = ndb.Key('k', stat.opt_ent_class)
@@ -129,7 +158,7 @@ def query(logger, stat, start_t, start_mem):
     #  #from meliae import scanner
     #  #scanner.dump_all_objects('/tmp/maliae/%d_%s_%d_%s_mem.dat' % (stat.batch_size, stat.paged, i, stat.gc))
 
- 
+
   entity = None
   #if stat.opt_use_gc:
   #  gc.collect()
@@ -137,22 +166,24 @@ def query(logger, stat, start_t, start_mem):
 
   tid = all_threads.setdefault(thread.get_ident(), len(all_threads))
   all_qs.append((tid, new_mem - smem))
+  all_els[ndb.eventloop._state.event_loop] = tid
+  cur_i = time.time() - START_T
+  all_pending.update(((cur_i, tid, id(fut)), fut) for fut in ndb.tasklets._state.all_pending)
   stat.ents_in_mem = len(wd)
   # logging.info(pprint.pformat(filter(bool,
   #   sorted([getattr(e._result, 'key', None) for e in getattr(fu, '_queue', [])] for fu in ndb.tasklets._state.all_pending))))
   stat.ents_fetched = i + 1
   stat.chars_fetched = chars
   stat.pending_rpcs = len(ndb.eventloop._state.event_loop.rpcs)
+  stat.all_pending_rpcs = sum(len(e.rpcs) for e in all_els)
   stat.pending_futures = len(ndb.tasklets._state.all_pending)
   stat.runtime = time.time() - start_t
-  stat.start_mem = start_mem
-  stat.net_mem = new_mem - start_mem
   stat.qs = ','.join(str(e) for e in all_qs)
   logger.info(stat)
   stat.put()
-  heaps.append(hp.heap())
-  if len(heaps) > 2:
-    import pdb; pdb.set_trace()
+  #heaps.append(hp.heap())
+  #if len(heaps) > 2:
+  #  import pdb; pdb.set_trace()
 class MyThread(threading.Thread):
   def run(self):
     while True:
@@ -205,6 +236,11 @@ def human_print(lines):
   format_string += '%s'
   return [format_string % line for line in str_lines]
 
+class PdbHandler(webapp2.RequestHandler):
+  def get(self):
+    import pdb; pdb.set_trace()
+
+
 class Stats(webapp2.RequestHandler):
   def get(self):
     r_id = self.request.get('id')
@@ -229,5 +265,6 @@ app = webapp2.WSGIApplication([
     ('/create', CreateData),
     ('/threadt', ThreadTest),
     ('/task/query', TaskHandler),
+    ('/break', PdbHandler),
     ('/stats', Stats)
     ], debug=True)
